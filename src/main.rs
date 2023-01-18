@@ -35,15 +35,11 @@ use serenity::{
     json::Value,
     model::channel::GuildChannel
 };
-use std::{
-    fs::{
-        self,
-        create_dir,
-        File
-    },
-    io::Write,
-    path::PathBuf,
-};
+use std::{env, fs::{
+    self,
+    create_dir,
+    File
+}, io::Write, path::PathBuf};
 use reqwest::{
     header::CONTENT_TYPE,
     Url
@@ -56,7 +52,6 @@ use serde_bytes::ByteBuf;
 use tokio::fs::create_dir_all;
 
 static DOWNLOAD_ATTACHMENTS_BY_DEFAULT: bool = false;
-const BOT_TOKEN: &str = "MTAyMzA2MDEwMDgyMDI1MDY5NQ.GVNXWS.OMr6zDeZrP136Vp7bKRNXeVR1uF5dgX0l5bBqU";
 const BACKUP_PATH: Option<&str> = Some("D:\\Documents");
 const CLOUD_BACKUP_PATH: &str = "D:\\MEGAsync";
 const DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNELS: &[u64] = &[
@@ -211,9 +206,9 @@ impl EventHandler for Handler {
 async fn main() {
     let framework = StandardFramework::new()
         .group(&GENERAL_GROUP);
-
+    let bot_token = env::args().nth(1).expect("Missing bot token parameter");
     let intents = GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT;
-    let mut client = Client::builder(BOT_TOKEN, intents)
+    let mut client = Client::builder(bot_token, intents)
         .event_handler(Handler)
         .framework(framework)
         .await
