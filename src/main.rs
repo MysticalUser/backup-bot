@@ -206,7 +206,7 @@ impl EventHandler for Handler {
 async fn main() {
     let framework = StandardFramework::new()
         .group(&GENERAL_GROUP);
-    let bot_token = env::args().nth(1).expect("Missing bot token parameter");
+    let bot_token = prompt("Enter the bot token");
     let intents = GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT;
     let mut client = Client::builder(bot_token, intents)
         .event_handler(Handler)
@@ -468,4 +468,11 @@ fn get_local_backup_path() -> PathBuf {
     } else {
         dirs::document_dir().expect("Failed to get document directory")
     }
+}
+
+fn prompt(p: &str) -> String {
+    let s = String::new();
+    println!("{}: ", p);
+    std::io::stdin().read_line(&mut s).unwrap();
+    s
 }
