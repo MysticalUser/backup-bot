@@ -35,11 +35,15 @@ use serenity::{
     json::Value,
     model::channel::GuildChannel
 };
-use std::{env, fs::{
-    self,
-    create_dir,
-    File
-}, io::Write, path::PathBuf};
+use std::{
+    fs::{
+        self,
+        create_dir,
+        File
+    },
+    io::Write,
+    path::PathBuf
+};
 use reqwest::{
     header::CONTENT_TYPE,
     Url
@@ -471,7 +475,7 @@ fn get_local_backup_path() -> PathBuf {
 }
 
 fn prompt(p: &str) -> String {
-    let s = String::new();
+    let mut s = String::new();
     println!("{}: ", p);
     std::io::stdin().read_line(&mut s).unwrap();
     s
