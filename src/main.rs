@@ -5,6 +5,11 @@
 
 // TODO: Recovery from backup
 
+use std::fs;
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
+use filenamify::filenamify;
 use serenity::{
     prelude::*,
     async_trait,
@@ -35,41 +40,34 @@ use serenity::{
     json::Value,
     model::channel::GuildChannel
 };
-use std::{
-    fs::{
-        self,
-        create_dir,
-        File
-    },
-    io::Write,
-    path::PathBuf
-};
 use reqwest::{
     header::CONTENT_TYPE,
     Url
 };
-use filenamify::filenamify;
 use mime::{APPLICATION_OCTET_STREAM, Mime};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
-use tokio::fs::create_dir_all;
 
-static DOWNLOAD_ATTACHMENTS_BY_DEFAULT: bool = false;
 const BACKUP_PATH: Option<&str> = Some("D:\\Documents");
-const CLOUD_BACKUP_PATH: &str = "D:\\MEGAsync";
+static DOWNLOAD_ATTACHMENTS_BY_DEFAULT: bool = false;
 const DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNELS: &[u64] = &[
-    866485359542140958, // #tasawwuf (will break the bot if not ignored for some reason)
+    866485359542140958,  // #tasawwuf (will break the bot if not ignored for some reason)
 
-    859279327266209852, // #applications-n-requests
-    979233287002279956, // #memes
-    912533380728487978, // #bots
-    859281904141860914, // #list-of-sus-imposters
-    912533380728487978, // #gayming
-    954822380063174696, // #affialiates-network
-    856072145628037160, // #roles
-    856064697069862932, // #announcements
-    856071493245730857, // #partnerships
+    957488150215807016,  // general-chat
+    860903535146303529,  // library-quick-search
+    859100525144440922,  // discussion
+    1021206357266923560, // qotd
+    860190358168272926,  // bruh-museum
+    859279327266209852,  // applications-n-requests
+    979233287002279956,  // memes
+    912533380728487978,  // bots
+    859281904141860914,  // list-of-sus-imposters
+    912533380728487978,  // gaming
+    954822380063174696,  // affiliates-network
+    856072145628037160,  // roles
+    856064697069862932,  // announcements
+    856071493245730857,  // partnerships
 ];
 const DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNEL_CATEGORIES: &[u64] = &[
     859220515997614102, // informational pings
@@ -86,34 +84,49 @@ struct General;
 struct Handler;
 
 #[derive(Serialize, Deserialize)]
-struct ChannelArchive {
-    name: String,
+struct Backup {
+    options: BackupOptions,
+    server: ServerArchive,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ServerArchive {
     id: u64,
-    category: CategoryArchive,
+    name: String,
+    channels: Vec<ChannelArchive>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ChannelArchive {
+    id: u64,
+    name: String,
+    category: Option<CategoryArchive>,
     messages: Vec<MessageArchive>,
 }
+
 #[derive(Serialize, Deserialize)]
 struct CategoryArchive {
-    name: String,
     id: u64,
+    name: String,
 }
+
 #[derive(Serialize, Deserialize)]
 struct MessageArchive {
+    author: (u64, String),
     content: String,
     attachments: Vec<AttachmentArchive>,
-    author_id: u64,
     timestamp: chrono::NaiveDateTime,
 }
+
 #[derive(Serialize, Deserialize)]
 struct AttachmentArchive {
     filename: String,
     url: String,
-    bytes: Option<ByteBuf>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct BackupOptions {
-    download_attachments: bool,
-    cloud_backup: bool,
+    download_attachments: bool
 }
 
 #[async_trait]
@@ -129,12 +142,6 @@ impl EventHandler for Handler {
                     option
                         .name("download-attachments")
                         .description("If true, backs up channel attachments.")
-                        .kind(CommandOptionType::Boolean)
-                })
-                .create_option(|option| {
-                    option
-                        .name("cloud-backup")
-                        .description("If true, backs up to cloud.")
                         .kind(CommandOptionType::Boolean)
                 })
         }).await.expect("Failed to created global slash command");
@@ -162,7 +169,6 @@ impl EventHandler for Handler {
         if let Interaction::ApplicationCommand(command) = interaction {
             let command_channel_id = command.channel_id;
             let guild_id = command.guild_id.expect("Failed to get guild");
-            let guild_name = guild_id.name(&ctx).expect("Failed to get guild name");
 
             match command.data.name.as_str() {
                 "backup-all" => {
@@ -177,28 +183,16 @@ impl EventHandler for Handler {
                         0,
                         DOWNLOAD_ATTACHMENTS_BY_DEFAULT,
                     );
-                    let cloud_backup = get_bool_option(
-                        &command.data.options,
-                        1,
-                        false,
-                    );
                     let backup_options = BackupOptions {
-                        download_attachments,
-                        cloud_backup,
+                        download_attachments
                     };
 
-                    println!("Copying server {}..", guild_name);
                     backup_server(
                         &ctx,
                         command_channel_id,
                         guild_id,
                         backup_options,
                     ).await.expect("Server backup failed");
-                    println!("Successfully copied server {}", guild_name);
-
-                    command_channel_id.send_message(ctx.http, |m|
-                        m.content("Successfully copied server.")
-                    ).await.expect("Failed to send success message");
                 }
                 _ => panic!("Command not implemented"),
             }
@@ -228,51 +222,8 @@ async fn backup_server(
     ctx: &Context,
     command_channel_id: ChannelId,
     guild_id: GuildId,
-    backup_options: BackupOptions,
+    BackupOptions { download_attachments, .. }: BackupOptions,
 ) -> CommandResult {
-    async fn to_message_archive(message: Message, download_attachments: bool) -> MessageArchive {
-        let mut message_archive = MessageArchive {
-            content: message.content,
-            attachments: Vec::new(),
-            timestamp: message.timestamp.naive_utc(),
-            author_id: message.author.id.0,
-        };
-        for attachment in message.attachments {
-            let bytes = if download_attachments {
-                Some(ByteBuf::from(attachment
-                    .download().await
-                    .inspect_err(|e| eprintln!("Error while downloading attachment: {e}")).unwrap()))
-            } else {
-                None
-            };
-            message_archive.attachments.push(AttachmentArchive {
-                filename: attachment.filename,
-                url: attachment.url,
-                bytes,
-            });
-        }
-        message_archive
-    }
-    async fn to_channel_archive(ctx: &Context, channel: GuildChannel, download_attachments: bool) -> ChannelArchive {
-        let category = channel.parent_id
-            .expect("Channel has no parent category")
-            .to_channel(&ctx).await.unwrap()
-            .category().unwrap();
-        let category_archive = CategoryArchive {
-            name: category.name,
-            id: category.id.0,
-        };
-        let mut channel_archive = ChannelArchive {
-            name: channel.name.clone(),
-            id: channel.id.0,
-            category: category_archive,
-            messages: Vec::new(),
-        };
-        for message in get_messages(ctx, channel.id).await.expect("Failed to get channel messages") {
-            channel_archive.messages.push(to_message_archive(message, download_attachments).await);
-        }
-        channel_archive
-    }
     async fn get_channels(ctx: &Context, guild_id: GuildId) -> Vec<GuildChannel> {
         guild_id
             .channels(&ctx.http).await.expect("Failed to get channels")
@@ -280,16 +231,13 @@ async fn backup_server(
             .filter(|c| c.kind == ChannelType::Text)
             .filter(|c| !DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNELS
                 .contains(&c.id.0))
-            .filter(|c| !DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNEL_CATEGORIES
-                .contains(&c.parent_id.expect("Not in category").0))
+            .filter(|c| match c.parent_id {
+                Some(id) => !DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNEL_CATEGORIES.contains(&id.0),
+                None => true,
+            })
             .collect::<Vec<_>>()
     }
-    async fn create_or_append_message(
-        ctx: &Context,
-        channel_id: ChannelId,
-        msg: &mut Option<Message>,
-        s: &str
-    ) -> Result<()> {
+    async fn create_or_append_message(ctx: &Context, channel_id: ChannelId, msg: &mut Option<Message>, s: &str) -> Result<()> {
         if let Some(msg) = msg {
             let new_content = format!("{}\n{}", &msg.content, &s);
             msg.edit(ctx, |m| m.content(new_content)).await
@@ -300,152 +248,156 @@ async fn backup_server(
         }
     }
 
-    let guild_name = guild_id.name(&ctx.cache).expect("Failed to get guild name");
+    let server_name = guild_id.name(&ctx.cache).unwrap();
+    let server_filename = filenamify(server_name.clone());
 
-    let server_dir = {
-        let mut path = if backup_options.cloud_backup {
-            PathBuf::from(CLOUD_BACKUP_PATH)
-        } else {
-            get_local_backup_path()
-        };
-        path.push(filenamify(guild_name));
+    let backup_dir = {
+        let mut path = get_backup_path();
+        path.push(&server_filename);
         if path.exists() {
             fs::remove_dir_all(&path).expect("Failed to delete backup directory");
         }
-        create_dir(&path).expect("Failed to create backup directory");
+        fs::create_dir_all(&path).expect("Failed to create backup directory");
+        path
+    };
+    let attachments_dir = {
+        let mut path = backup_dir.clone();
+        path.push("attachments");
+        if download_attachments {
+            fs::create_dir(&path).expect("Failed to create attachments directory");
+        }
         path
     };
 
-    let channels = get_channels(ctx, guild_id).await;
-    let channel_count = channels.len();
-    let mut progress_message = command_channel_id
-        .send_message(&ctx.http, |m| m.content("0% done.."))
-        .await?;
-    for (i, channel) in channels.into_iter().enumerate() {
-        let channel_archive = to_channel_archive(ctx, channel, backup_options.download_attachments).await;
+    println!("Copying server {}..", server_name);
 
-        println!("Copying channel {}/{} {}", i + 1, channel_count, channel_archive.name);
-
-        let channel_dir = {
-            let mut path = server_dir.clone();
-            path.push(filenamify(channel_archive.category.name));
-            path.push(filenamify(channel_archive.name));
-            create_dir_all(&path).await.unwrap();
-            path
+    let server_archive = {
+        let mut server_archive = ServerArchive {
+            id: guild_id.0,
+            name: server_name.clone(),
+            channels: Vec::new(),
         };
-        let attachments_dir = {
-            let mut path = channel_dir.clone();
-            path.push("attachments");
-            if backup_options.download_attachments {
-                create_dir(path.clone()).unwrap();
-            }
-            path
-        };
-        let messages_path = {
-            let mut path = channel_dir.clone();
-            path.push("messages.txt");
-            path
-        };
-        let mut channel_file = File::create(messages_path).expect("Failed to open backup file");
-
-        const MESSAGE_SEPARATOR: &str = "---------------------------------------------------------\n\n";
-        let mut write = |s: &str| channel_file
-            .write_all(s.as_bytes())
-            .expect("Failed to write to backup file");
-
-        let mut prev_author_id = None;
-        let mut prev_timestamp = None;
-        for message in channel_archive.messages.into_iter().rev() {
-            let cur_author_id = message.author_id;
-            let cur_timestamp = message.timestamp;
-            if let (Some(prev_author_id), Some(prev_timestamp)) = (prev_author_id, prev_timestamp) {
-                let duration = cur_timestamp.signed_duration_since(prev_timestamp);
-                if cur_author_id != prev_author_id || duration.num_hours() >= 1 {
-                    write(MESSAGE_SEPARATOR);
-                }
-            }
-            prev_author_id = Some(cur_author_id);
-            prev_timestamp = Some(cur_timestamp);
-
-            write(&message.content);
-            write("\n");
-
-            if backup_options.download_attachments {
+        let channels = get_channels(ctx, guild_id).await;
+        let channel_count = channels.len();
+        let mut progress_message = command_channel_id
+            .send_message(&ctx.http, |m| m.content("0% done.."))
+            .await?;
+        for (i, channel) in channels.into_iter().enumerate() {
+            println!("Copying channel {}/{} {}", i + 1, channel_count, channel.name);
+            let category_archive= match channel.parent_id {
+                Some(id) => Some({
+                    let category = id
+                        .to_channel(&ctx).await.unwrap()
+                        .category().unwrap();
+                    CategoryArchive {
+                        name: category.name,
+                        id: category.id.0,
+                    }
+                }),
+                None => None,
+            };
+            let mut channel_archive = ChannelArchive {
+                name: channel.name.clone(),
+                id: channel.id.0,
+                category: category_archive,
+                messages: Vec::new(),
+            };
+            for message in get_messages(ctx, channel.id).await.expect("Failed to get channel messages") {
+                let author = message.author;
+                let mut message_archive = MessageArchive {
+                    author: (author.id.0, author.name),
+                    content: message.content.clone(),
+                    attachments: Vec::new(),
+                    timestamp: message.timestamp.naive_utc(),
+                };
                 for attachment in message.attachments {
-                    write(&attachment.url);
-                    write("\n");
-
-                    if let Some(bytes) = attachment.bytes {
+                    let filename = format!("{} - {}", attachment.id.0, attachment.filename);
+                    message_archive.attachments.push(AttachmentArchive {
+                        filename: filename.to_string(),
+                        url: attachment.url.clone(),
+                    });
+                    if download_attachments {
+                        let bytes = ByteBuf::from(attachment
+                            .download().await
+                            .inspect_err(|e| eprintln!("Error while downloading attachment: {e}")).unwrap());
                         let attachment_path = {
                             let mut path = attachments_dir.clone();
-                            path.push(attachment.filename);
+                            path.push(filename);
                             path
                         };
                         let mut attachment_file = File::create(attachment_path).expect("Failed to create attachment file");
                         attachment_file.write_all(bytes.as_ref()).expect("Failed to write to attachment file");
                     }
                 }
-
-                let url_regex = Regex::new(URL_PATTERN)?;
-                let urls = url_regex
-                    .find_iter(&message.content)
-                    .filter_map(|url| Url::parse(url.as_str()).inspect_err(|e| eprintln!("Failed to parse url: {e}")).ok());
-                for url in urls {
-                    let last_segment = url.path_segments().unwrap().last().unwrap().to_string();
-                    let domain = url.domain().unwrap().to_string();
-                    let url_string = url.to_string();
-                    match reqwest::get(url).await {
-                        Ok(response) => {
-                            let headers = response.headers();
-                            if let Some(content_type) = headers.get(CONTENT_TYPE) {
-                                let content_type = content_type
-                                    .to_str().unwrap()
-                                    .split_ascii_whitespace()
-                                    .next().expect("Invalid header")
-                                    .parse::<Mime>().unwrap_or(APPLICATION_OCTET_STREAM);
-                                if content_type.subtype() == mime::PDF {
-                                    let attachment_path_1 = {
-                                        let mut path = attachments_dir.clone();
-                                        path.push(filenamify(last_segment.clone()));
-                                        path
-                                    };
-                                    let attachment_path_2 = {
-                                        let mut path = attachments_dir.clone();
-                                        path.push(filenamify(domain.clone()));
-                                        path
-                                    };
-                                    let mut attachment_file = match File::create(attachment_path_1) {
-                                        Ok(file) => file,
-                                        Err(_) => match File::create(attachment_path_2) {
-                                            Ok(file) => file,
-                                            Err(e) => panic!("Failed to create attachment file: {}", e),
+                if download_attachments {
+                    let url_regex = Regex::new(URL_PATTERN).expect("Failed to compile regex");
+                    let urls = url_regex
+                        .find_iter(&message.content)
+                        .filter_map(|url| Url::parse(url.as_str()).inspect_err(|e| eprintln!("Failed to parse url: {e}")).ok());
+                    for url in urls {
+                        let last_segment = url.path_segments().unwrap().last().unwrap().to_string();
+                        let url_string = url.to_string();
+                        match reqwest::get(url).await {
+                            Ok(response) => {
+                                let headers = response.headers();
+                                if let Some(content_type) = headers.get(CONTENT_TYPE) {
+                                    let content_type = content_type
+                                        .to_str().unwrap()
+                                        .split_ascii_whitespace()
+                                        .next().expect("Invalid header")
+                                        .parse::<Mime>().unwrap_or(APPLICATION_OCTET_STREAM);
+                                    if content_type.subtype() == mime::PDF {
+                                        match response.bytes().await {
+                                            Ok(bytes) => {
+                                                println!("Downloaded {}", url_string);
+                                                message_archive.attachments.push(AttachmentArchive {
+                                                    filename: last_segment.clone(),
+                                                    url: url_string,
+                                                });
+                                                let attachment_path = {
+                                                    let mut path = attachments_dir.clone();
+                                                    path.push(last_segment);
+                                                    path
+                                                };
+                                                let mut attachment_file = File::create(attachment_path).expect("Failed to create attachment file");
+                                                attachment_file.write_all(&bytes).expect("Failed to write to attachment file");
+                                            }
+                                            Err(e) => eprintln!("{e}"),
                                         }
-                                    };
-                                    match response.bytes().await {
-                                        Ok(bytes) => {
-                                            println!("Downloaded {}", url_string);
-                                            attachment_file.write_all(&bytes).expect("Failed to write to attachment file");
-                                        }
-                                        Err(e) => eprintln!("{e}")
                                     }
                                 }
                             }
+                            Err(e) => eprintln!("{e}")
                         }
-                        Err(e) => eprintln!("{e}")
                     }
                 }
+                channel_archive.messages.push(message_archive);
             }
+            server_archive.channels.push(channel_archive);
 
-            write("\n");
+            println!("Successfully copied channel.");
+            progress_message.edit(&ctx.http, |m|
+                m.content(format!("{}% done..", 100 * i / (channel_count)))
+            ).await?;
+            command_channel_id.broadcast_typing(&ctx.http).await?;
         }
+        progress_message.delete(ctx).await?;
+        command_channel_id.send_message(&ctx.http, |m| m.content("Successfully copied server.")).await?;
+        server_archive
+    };
 
-        progress_message.edit(&ctx.http, |m|
-            m.content(format!("{}% done..", 100 * i / (channel_count)))
-        ).await?;
-        println!("Successfully copied channel.");
-        command_channel_id.broadcast_typing(&ctx.http).await?;
-    }
-    progress_message.delete(ctx).await?;
+    println!("Copying to PC...");
+    let path = {
+        let mut path = backup_dir.clone();
+        path.push(server_filename);
+        path.set_extension("json");
+        path
+    };
+    let mut file = File::create(&path).expect("Failed to create file");
+    let json_string = serde_json::to_string(&server_archive).expect("Failed to parse server archive to JSON");
+    file.write_all(&json_string.into_bytes()).expect("Failed to write to file");
+
+    println!("Successfully copied {} to {}", server_name, path.to_str().unwrap());
 
     Ok(())
 }
@@ -454,19 +406,20 @@ async fn get_messages(ctx: &Context, channel_id: ChannelId) -> Result<Vec<Messag
     let mut messages = channel_id
         .messages(&ctx.http, |retriever| retriever.limit(100))
         .await?;
-    while messages.len() == 100 {
-        if let Some(last) = messages.last() {
-            let mut next_messages = channel_id
-                .messages(&ctx.http, |retriever|
-                    retriever.before(last).limit(100))
-                .await?;
-            messages.append(&mut next_messages);
+    while let Some(last) = messages.last() {
+        let mut next_messages = channel_id
+            .messages(&ctx.http, |retriever|
+                retriever.before(last).limit(100))
+            .await?;
+        if next_messages.is_empty() {
+            break;
         }
+        messages.append(&mut next_messages);
     }
     Ok(messages)
 }
 
-fn get_local_backup_path() -> PathBuf {
+fn get_backup_path() -> PathBuf {
     if let Some(backup_path) = BACKUP_PATH {
         PathBuf::from(backup_path)
     } else {
