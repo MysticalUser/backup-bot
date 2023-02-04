@@ -98,30 +98,6 @@ pub async fn backup_server(
     guild_id: GuildId,
     download_attachments: bool,
 ) -> CommandResult {
-    async fn get_channels(ctx: &Context, guild_id: GuildId) -> Vec<GuildChannel> {
-        guild_id
-            .channels(&ctx.http).await.expect("Failed to get channels")
-            .into_values()
-            .filter(|c| c.kind == ChannelType::Text || c.kind == ChannelType::PublicThread)
-            .filter(|c| !DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNELS
-                .contains(&c.id.0))
-            .filter(|c| match c.parent_id {
-                Some(id) => !DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNEL_CATEGORIES.contains(&id.0),
-                None => true,
-            })
-            .collect::<Vec<_>>()
-    }
-    async fn create_or_append_message(ctx: &Context, channel_id: ChannelId, msg: &mut Option<Message>, s: &str) -> Result<()> {
-        if let Some(msg) = msg {
-            let new_content = format!("{}\n{}", &msg.content, &s);
-            msg.edit(ctx, |m| m.content(new_content)).await
-        } else {
-            channel_id.send_message(&ctx.http, |m| m.content(s))
-                .await
-                .map(|new_msg| { *msg = Some(new_msg); })
-        }
-    }
-
     let server_name = guild_id.name(&ctx.cache).unwrap();
     let server_filename = filenamify(server_name.clone());
 
@@ -169,7 +145,11 @@ pub async fn backup_server(
                 category: category_archive,
                 messages: Vec::new(),
             };
-            for message in get_messages(ctx, channel.id).await.expect("Failed to get channel messages") {
+            let messages = match get_messages(ctx, channel.id).await {
+                Ok(x) => x,
+                Err(e) => { eprintln!("Failed to get channel messages: {e}"); break; }
+            };
+            for message in messages {
                 let author = message.author;
                 let mut message_archive = MessageArchive {
                     author: (author.id.0, author.name),
@@ -257,6 +237,20 @@ pub async fn backup_server(
     println!("Successfully copied {} to {}", server_name, path.to_str().unwrap());
 
     Ok(())
+}
+
+async fn get_channels(ctx: &Context, guild_id: GuildId) -> Vec<GuildChannel> {
+    guild_id
+        .channels(&ctx.http).await.expect("Failed to get channels")
+        .into_values()
+        .filter(|c| c.kind == ChannelType::Text || c.kind == ChannelType::PublicThread)
+        .filter(|c| !DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNELS
+            .contains(&c.id.0))
+        .filter(|c| match c.parent_id {
+            Some(id) => !DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNEL_CATEGORIES.contains(&id.0),
+            None => true,
+        })
+        .collect::<Vec<_>>()
 }
 
 async fn get_messages(ctx: &Context, channel_id: ChannelId) -> Result<Vec<Message>> {
