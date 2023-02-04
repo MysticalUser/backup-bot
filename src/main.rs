@@ -228,7 +228,7 @@ async fn backup_server(
         guild_id
             .channels(&ctx.http).await.expect("Failed to get channels")
             .into_values()
-            .filter(|c| c.kind == ChannelType::Text)
+            .filter(|c| c.kind == ChannelType::Text || c.kind == ChannelType::PublicThread)
             .filter(|c| !DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNELS
                 .contains(&c.id.0))
             .filter(|c| match c.parent_id {
@@ -251,23 +251,16 @@ async fn backup_server(
     let server_name = guild_id.name(&ctx.cache).unwrap();
     let server_filename = filenamify(server_name.clone());
 
-    let backup_dir = {
-        let mut path = get_backup_path();
-        path.push(&server_filename);
-        if path.exists() {
-            fs::remove_dir_all(&path).expect("Failed to delete backup directory");
-        }
-        fs::create_dir_all(&path).expect("Failed to create backup directory");
-        path
-    };
-    let attachments_dir = {
-        let mut path = backup_dir.clone();
-        path.push("attachments");
-        if download_attachments {
-            fs::create_dir(&path).expect("Failed to create attachments directory");
-        }
-        path
-    };
+    let backup_dir = get_backup_path().join(&server_filename);
+    if backup_dir.exists() {
+        fs::remove_dir_all(&backup_dir).expect("Failed to delete backup directory");
+    }
+    fs::create_dir_all(&backup_dir).expect("Failed to create backup directory");
+
+    let attachments_dir = backup_dir.clone().join("attachments");
+    if download_attachments {
+        fs::create_dir(&attachments_dir).expect("Failed to create attachments directory");
+    }
 
     println!("Copying server {}..", server_name);
 
@@ -320,11 +313,7 @@ async fn backup_server(
                         let bytes = ByteBuf::from(attachment
                             .download().await
                             .inspect_err(|e| eprintln!("Error while downloading attachment: {e}")).unwrap());
-                        let attachment_path = {
-                            let mut path = attachments_dir.clone();
-                            path.push(filename);
-                            path
-                        };
+                        let attachment_path = attachments_dir.clone().join(filename);
                         let mut attachment_file = File::create(attachment_path).expect("Failed to create attachment file");
                         attachment_file.write_all(bytes.as_ref()).expect("Failed to write to attachment file");
                     }
@@ -354,13 +343,11 @@ async fn backup_server(
                                                     filename: last_segment.clone(),
                                                     url: url_string,
                                                 });
-                                                let attachment_path = {
-                                                    let mut path = attachments_dir.clone();
-                                                    path.push(last_segment);
-                                                    path
-                                                };
-                                                let mut attachment_file = File::create(attachment_path).expect("Failed to create attachment file");
-                                                attachment_file.write_all(&bytes).expect("Failed to write to attachment file");
+                                                let attachment_path = attachments_dir.clone().join(last_segment);
+                                                match File::create(&attachment_path) {
+                                                    Ok(mut attachment_file) => attachment_file.write_all(&bytes).expect("Failed to write to attachment file"),
+                                                    Err(e) => eprintln!("ERROR: failed to create attachment file at {}: {e}", attachment_path.to_str().unwrap()),
+                                                }
                                             }
                                             Err(e) => eprintln!("{e}"),
                                         }
@@ -387,12 +374,8 @@ async fn backup_server(
     };
 
     println!("Copying to PC...");
-    let path = {
-        let mut path = backup_dir.clone();
-        path.push(server_filename);
-        path.set_extension("json");
-        path
-    };
+    let mut path = backup_dir.clone().join(server_filename);
+    path.set_extension("json");
     let mut file = File::create(&path).expect("Failed to create file");
     let json_string = serde_json::to_string(&server_archive).expect("Failed to parse server archive to JSON");
     file.write_all(&json_string.into_bytes()).expect("Failed to write to file");
@@ -403,18 +386,22 @@ async fn backup_server(
 }
 
 async fn get_messages(ctx: &Context, channel_id: ChannelId) -> Result<Vec<Message>> {
+    const PAGES: usize = 5;
     let mut messages = channel_id
         .messages(&ctx.http, |retriever| retriever.limit(100))
         .await?;
-    while let Some(last) = messages.last() {
-        let mut next_messages = channel_id
-            .messages(&ctx.http, |retriever|
-                retriever.before(last).limit(100))
-            .await?;
-        if next_messages.is_empty() {
-            break;
+    for _ in 0..PAGES {
+        let last = messages.last();
+        if let Some(last) = last {
+            let mut next_messages = channel_id
+                .messages(&ctx.http, |retriever|
+                    retriever.before(last).limit(100))
+                .await?;
+            if next_messages.is_empty() {
+                break;
+            }
+            messages.append(&mut next_messages);
         }
-        messages.append(&mut next_messages);
     }
     Ok(messages)
 }
