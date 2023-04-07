@@ -19,6 +19,7 @@ use serenity::{
     },
     Result,
 };
+use tokio::time;
 use reqwest::{
     header::CONTENT_TYPE,
     Url
@@ -31,6 +32,7 @@ use serde_bytes::ByteBuf;
 const BACKUP_PATH: Option<&str> = Some("D:\\Documents");
 const DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNELS: &[u64] = &[
     866485359542140958,  // #tasawwuf (will break the bot if not ignored for some reason)
+    1034510586840621136, // #great-websites (same thing)
 
     957488150215807016,  // general-chat
     860903535146303529,  // library-quick-search
@@ -54,8 +56,14 @@ const DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNEL_CATEGORIES: &[u64] = &[
     865336860401991741, // jail
     857498139246329867, // verification
 ];
-
 const URL_PATTERN: &str = r#"(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:'".,<>?«»“”‘’]))"#;
+const GET_CHANNEL_MESSAGES_TIMEOUT: f32 = 5.0; // In minutes
+
+#[derive(Serialize, Deserialize)]
+pub struct BackupOptions {
+    pub download_attachments: Option<bool>,
+    pub backup_name: Option<String>,
+}
 
 #[derive(Serialize, Deserialize)]
 struct ServerArchive {
@@ -96,14 +104,25 @@ pub async fn backup_server(
     ctx: &Context,
     command_channel_id: ChannelId,
     guild_id: GuildId,
-    download_attachments: bool,
+    backup_options: BackupOptions,
 ) -> CommandResult {
     let server_name = guild_id.name(&ctx.cache).unwrap();
-    let server_filename = filenamify(server_name.clone());
+    let download_attachments = backup_options.download_attachments.unwrap_or(false);
+    let backup_name = filenamify(backup_options.backup_name.unwrap_or_else(|| server_name.clone()));
 
-    let backup_dir = get_backup_path().join(&server_filename);
+    let backup_dir = get_backup_path().join(&backup_name);
     if backup_dir.exists() {
-        fs::remove_dir_all(&backup_dir).expect("Failed to delete backup directory");
+        println!("There is already a backup with this name. Would you like to delete it? (Y/N)");
+        loop {
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).unwrap();
+            let input = input.trim().to_lowercase();
+            match input.as_str() {
+                "y" => { fs::remove_dir_all(&backup_dir).expect("Failed to delete backup directory"); break; },
+                "n" => return Ok(()),
+                _ => (),
+            }
+        }
     }
     fs::create_dir_all(&backup_dir).expect("Failed to create backup directory");
 
@@ -125,7 +144,7 @@ pub async fn backup_server(
         let mut progress_message = command_channel_id
             .send_message(&ctx.http, |m| m.content("0% done.."))
             .await?;
-        for (i, channel) in channels.into_iter().enumerate() {
+        'channel_loop: for (i, channel) in channels.into_iter().enumerate() {
             println!("Copying channel {}/{} {}", i + 1, channel_count, channel.name);
             let category_archive= match channel.parent_id {
                 Some(id) => Some({
@@ -145,9 +164,16 @@ pub async fn backup_server(
                 category: category_archive,
                 messages: Vec::new(),
             };
-            let messages = match get_messages(ctx, channel.id).await {
-                Ok(x) => x,
-                Err(e) => { eprintln!("Failed to get channel messages: {e}"); break; }
+            let messages_future = time::timeout(
+                time::Duration::from_secs_f32(60.0 * GET_CHANNEL_MESSAGES_TIMEOUT),
+                get_messages(ctx, channel.id)
+            );
+            let messages = match messages_future.await {
+                Ok(x) => match x {
+                    Ok(x) => x,
+                    Err(e) => { eprintln!("Failed to get channel messages: {e}"); break; }
+                }
+                Err(_) => { eprintln!("Getting channel messages took too long"); continue 'channel_loop; }
             };
             for message in messages {
                 let author = message.author;
@@ -228,7 +254,7 @@ pub async fn backup_server(
     };
 
     println!("Copying to PC...");
-    let mut path = backup_dir.clone().join(server_filename);
+    let mut path = backup_dir.clone().join(backup_name);
     path.set_extension("json");
     let mut file = File::create(&path).expect("Failed to create file");
     let json_string = serde_json::to_string(&server_archive).expect("Failed to parse server archive to JSON");
@@ -254,11 +280,11 @@ async fn get_channels(ctx: &Context, guild_id: GuildId) -> Vec<GuildChannel> {
 }
 
 async fn get_messages(ctx: &Context, channel_id: ChannelId) -> Result<Vec<Message>> {
-    const PAGES: usize = 5;
+    const HUNDREDS: usize = 10;
     let mut messages = channel_id
         .messages(&ctx.http, |retriever| retriever.limit(100))
         .await?;
-    for _ in 0..PAGES {
+    for _ in 0..HUNDREDS {
         let last = messages.last();
         if let Some(last) = last {
             let mut next_messages = channel_id

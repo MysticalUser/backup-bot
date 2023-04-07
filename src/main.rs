@@ -27,7 +27,7 @@ use serenity::{
     },
     json::Value,
 };
-use crate::backup::backup_server;
+use crate::backup::{backup_server, BackupOptions};
 
 #[group]
 struct General;
@@ -58,13 +58,19 @@ impl EventHandler for Handler {
 
         Command::create_global_application_command(&ctx.http, |command| {
             command
-                .name("backup-all")
-                .description("Backs up all channels of the server.")
+                .name("backup")
+                .description("Backs up the server.")
                 .create_option(|option| {
                     option
                         .name("download-attachments")
-                        .description("If true, backs up channel attachments.")
+                        .description("Backup up channel attachments")
                         .kind(CommandOptionType::Boolean)
+                })
+                .create_option(|option| {
+                    option
+                        .name("name")
+                        .description("The name of the backup")
+                        .kind(CommandOptionType::String)
                 })
         }).await.expect("Failed to created global slash command");
 
@@ -76,16 +82,17 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        fn get_bool_option(
-            command_options: &[CommandDataOption],
-            option_index: usize,
-            default_value: bool
-        ) -> bool {
+        fn get_bool_option(command_options: &[CommandDataOption], option_index: usize) -> Option<bool> {
             command_options
                 .get(option_index)
                 .and_then(|x| x.clone().value)
                 .map(|x| match x { Value::Bool(x) => x, _ => panic!("Unexpected object") })
-                .unwrap_or(default_value)
+        }
+        fn get_string_option(command_options: &[CommandDataOption], option_index: usize) -> Option<String> {
+            command_options
+                .get(option_index)
+                .and_then(|x| x.clone().value)
+                .map(|x| match x { Value::String(x) => x, _ => panic!("Unexpected object") })
         }
 
         if let Interaction::ApplicationCommand(command) = interaction {
@@ -93,24 +100,23 @@ impl EventHandler for Handler {
             let guild_id = command.guild_id.expect("Failed to get guild");
 
             match command.data.name.as_str() {
-                "backup-all" => {
+                "backup" => {
                     command.create_interaction_response(&ctx.http, |response| {
                         response
                             .kind(InteractionResponseType::ChannelMessageWithSource)
                             .interaction_response_data(|m| m.content("Starting copy.."))
                     }).await.expect("Failed to respond to slash command");
 
-                    let download_attachments = get_bool_option(
-                        &command.data.options,
-                        0,
-                        false,
-                    );
+                    let options = &command.data.options;
+                    let download_attachments = get_bool_option(options, 0);
+                    let backup_name = get_string_option(options, 1);
+                    let backup_options = BackupOptions { download_attachments, backup_name };
 
                     backup_server(
                         &ctx,
                         command_channel_id,
                         guild_id,
-                        download_attachments,
+                        backup_options,
                     ).await.expect("Server backup failed");
                 }
                 _ => panic!("Command not implemented"),
