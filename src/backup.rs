@@ -175,6 +175,11 @@ pub async fn backup_server(
                 }
                 Err(_) => { eprintln!("Getting channel messages took too long"); continue 'channel_loop; }
             };
+
+            if messages.is_empty() {
+                continue 'channel_loop;
+            }
+
             for message in messages {
                 let author = message.author;
                 let mut message_archive = MessageArchive {
@@ -184,16 +189,16 @@ pub async fn backup_server(
                     timestamp: message.timestamp.naive_utc(),
                 };
 
+                let channel_attachment_dir = attachments_dir.clone().join(channel.name.clone());
+                if !channel_attachment_dir.exists() {
+                    fs::create_dir(&channel_attachment_dir).expect("Failed to create channel attachment directory");
+                }
                 for attachment in message.attachments {
                     let filename = format!("{} - {}", attachment.id.0, attachment.filename);
                     message_archive.attachments.push(AttachmentArchive {
                         filename: filename.to_string(),
                         url: attachment.url.clone(),
                     });
-                    let channel_attachment_dir = attachments_dir.clone().join(channel.name.clone());
-                    if !channel_attachment_dir.exists() {
-                        fs::create_dir(&channel_attachment_dir).expect("Failed to create channel attachment directory");
-                    }
                     if download_attachments {
                         let bytes = ByteBuf::from(attachment
                             .download().await
@@ -228,7 +233,7 @@ pub async fn backup_server(
                                                     filename: last_segment.clone(),
                                                     url: url_string,
                                                 });
-                                                let attachment_path = attachments_dir.clone().join(&last_segment);
+                                                let attachment_path = channel_attachment_dir.clone().join(&last_segment);
                                                 match File::create(&attachment_path) {
                                                     Ok(mut attachment_file) => attachment_file.write_all(&bytes).expect("Failed to write to attachment file"),
                                                     Err(e) => eprintln!("Failed to create attachment file  {}: {e}", last_segment),
