@@ -183,17 +183,22 @@ pub async fn backup_server(
                     attachments: Vec::new(),
                     timestamp: message.timestamp.naive_utc(),
                 };
+
                 for attachment in message.attachments {
                     let filename = format!("{} - {}", attachment.id.0, attachment.filename);
                     message_archive.attachments.push(AttachmentArchive {
                         filename: filename.to_string(),
                         url: attachment.url.clone(),
                     });
+                    let channel_attachment_dir = attachments_dir.clone().join(channel.name.clone());
+                    if !channel_attachment_dir.exists() {
+                        fs::create_dir(&channel_attachment_dir).expect("Failed to create channel attachment directory");
+                    }
                     if download_attachments {
                         let bytes = ByteBuf::from(attachment
                             .download().await
                             .inspect_err(|e| eprintln!("Error while downloading attachment: {e}")).unwrap());
-                        let attachment_path = attachments_dir.clone().join(filename);
+                        let attachment_path = channel_attachment_dir.clone().join(filename);
                         let mut attachment_file = File::create(attachment_path).expect("Failed to create attachment file");
                         attachment_file.write_all(bytes.as_ref()).expect("Failed to write to attachment file");
                     }
