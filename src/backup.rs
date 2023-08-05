@@ -301,6 +301,7 @@ async fn get_messages(ctx: &Context, channel_id: ChannelId) -> Result<Vec<Messag
                     retriever.before(last).limit(100))
                 .await?;
             if next_messages.is_empty() {
+                println!("Done! final message: {}", last.link());
                 break;
             }
             messages.append(&mut next_messages);
