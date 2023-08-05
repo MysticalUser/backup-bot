@@ -1,7 +1,6 @@
 #![feature(result_option_inspect)]
 #![feature(write_all_vectored)]
 #![feature(async_closure)]
-#![feature(is_some_with)]
 
 // TODO: Recovery from backup
 
