@@ -56,6 +56,9 @@ const DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNEL_CATEGORIES: &[u64] = &[
     865336860401991741, // jail
     857498139246329867, // verification
 ];
+const IGNORED_DOMAINS: &[&str] = &[
+    "twitter.com"
+];
 const URL_PATTERN: &str = r#"(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:'".,<>?«»“”‘’]))"#;
 const GET_CHANNEL_MESSAGES_TIMEOUT: f32 = 10.0; // In minutes
 
@@ -164,6 +167,10 @@ pub async fn backup_server(
                 category: category_archive,
                 messages: Vec::new(),
             };
+            let channel_attachment_dir = attachments_dir.clone().join(channel.name.clone());
+            if !channel_attachment_dir.exists() && download_attachments {
+                fs::create_dir(&channel_attachment_dir).expect("Failed to create channel attachment directory");
+            }
             let messages_future = time::timeout(
                 time::Duration::from_secs_f32(60.0 * GET_CHANNEL_MESSAGES_TIMEOUT),
                 get_messages(ctx, channel.id)
@@ -171,14 +178,12 @@ pub async fn backup_server(
             let messages = match messages_future.await {
                 Ok(x) => match x {
                     Ok(x) => x,
-                    Err(e) => { eprintln!("Failed to get channel messages: {e}"); break; }
+                    Err(e) => { eprintln!("Failed to get channel messages: {e}"); continue 'channel_loop; }
                 }
                 Err(_) => { eprintln!("Getting channel messages took too long"); continue 'channel_loop; }
             };
 
-            if messages.is_empty() {
-                continue 'channel_loop;
-            }
+            if messages.is_empty() { continue 'channel_loop; }
 
             for message in messages {
                 let author = message.author;
@@ -196,12 +201,8 @@ pub async fn backup_server(
                     });
                 }
                 if download_attachments {
-                    let channel_attachment_dir = attachments_dir.clone().join(channel.name.clone());
-                    if !channel_attachment_dir.exists() {
-                        fs::create_dir(&channel_attachment_dir).expect("Failed to create channel attachment directory");
-                    }
                     for attachment in message.attachments {
-                        let filename = format!("{} - {}", attachment.id.0, attachment.filename);
+                        let filename = format!("{} - {}", attachment.id.0, filenamify(attachment.filename.clone()));
                         let bytes = ByteBuf::from(attachment
                             .download().await
                             .inspect_err(|e| eprintln!("Error while downloading attachment: {e}")).unwrap());
@@ -214,6 +215,8 @@ pub async fn backup_server(
                         .find_iter(&message.content)
                         .filter_map(|url| Url::parse(url.as_str()).inspect_err(|e| eprintln!("Failed to parse url: {e}")).ok());
                     for url in urls {
+                        let domain = url.domain().expect("Invalid url");
+                        if IGNORED_DOMAINS.contains(&domain) { continue; }
                         let last_segment = url.path_segments().unwrap().last().unwrap().to_string();
                         let url_string = url.to_string();
                         match reqwest::get(url).await {
@@ -250,6 +253,7 @@ pub async fn backup_server(
                 }
                 channel_archive.messages.push(message_archive);
             }
+
             server_archive.channels.push(channel_archive);
 
             println!("Successfully copied channel.");
@@ -301,12 +305,13 @@ async fn get_messages(ctx: &Context, channel_id: ChannelId) -> Result<Vec<Messag
                     retriever.before(last).limit(100))
                 .await?;
             if next_messages.is_empty() {
-                println!("Done! final message: {}", last.link());
                 break;
             }
             messages.append(&mut next_messages);
+            print!(".");
         }
     }
+    println!();
     Ok(messages)
 }
 
