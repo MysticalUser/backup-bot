@@ -29,7 +29,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
-const BACKUP_PATH: Option<&str> = Some("D:\\Documents");
+const BACKUP_PATH: Option<&str> = Some(r#"C:\Users\ffmou\Stuff\Documents\Backups"#);
 const DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNELS: &[u64] = &[
     866485359542140958,  // #tasawwuf (will break the bot if not ignored for some reason)
     1034510586840621136, // #great-websites (same thing)
@@ -57,7 +57,7 @@ const DIGITAL_ISLAMIC_LIBRARY_IGNORED_CHANNEL_CATEGORIES: &[u64] = &[
     857498139246329867, // verification
 ];
 const URL_PATTERN: &str = r#"(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:'".,<>?«»“”‘’]))"#;
-const GET_CHANNEL_MESSAGES_TIMEOUT: f32 = 5.0; // In minutes
+const GET_CHANNEL_MESSAGES_TIMEOUT: f32 = 10.0; // In minutes
 
 #[derive(Serialize, Deserialize)]
 pub struct BackupOptions {
@@ -188,18 +188,20 @@ pub async fn backup_server(
                     attachments: Vec::new(),
                     timestamp: message.timestamp.naive_utc(),
                 };
-
-                let channel_attachment_dir = attachments_dir.clone().join(channel.name.clone());
-                if !channel_attachment_dir.exists() {
-                    fs::create_dir(&channel_attachment_dir).expect("Failed to create channel attachment directory");
-                }
-                for attachment in message.attachments {
+                for attachment in message.attachments.iter() {
                     let filename = format!("{} - {}", attachment.id.0, attachment.filename);
                     message_archive.attachments.push(AttachmentArchive {
                         filename: filename.to_string(),
                         url: attachment.url.clone(),
                     });
-                    if download_attachments {
+                }
+                if download_attachments {
+                    let channel_attachment_dir = attachments_dir.clone().join(channel.name.clone());
+                    if !channel_attachment_dir.exists() {
+                        fs::create_dir(&channel_attachment_dir).expect("Failed to create channel attachment directory");
+                    }
+                    for attachment in message.attachments {
+                        let filename = format!("{} - {}", attachment.id.0, attachment.filename);
                         let bytes = ByteBuf::from(attachment
                             .download().await
                             .inspect_err(|e| eprintln!("Error while downloading attachment: {e}")).unwrap());
@@ -207,8 +209,6 @@ pub async fn backup_server(
                         let mut attachment_file = File::create(attachment_path).expect("Failed to create attachment file");
                         attachment_file.write_all(bytes.as_ref()).expect("Failed to write to attachment file");
                     }
-                }
-                if download_attachments {
                     let url_regex = Regex::new(URL_PATTERN).expect("Failed to compile regex");
                     let urls = url_regex
                         .find_iter(&message.content)
@@ -290,11 +290,10 @@ async fn get_channels(ctx: &Context, guild_id: GuildId) -> Vec<GuildChannel> {
 }
 
 async fn get_messages(ctx: &Context, channel_id: ChannelId) -> Result<Vec<Message>> {
-    const HUNDREDS: usize = 10;
     let mut messages = channel_id
         .messages(&ctx.http, |retriever| retriever.limit(100))
         .await?;
-    for _ in 0..HUNDREDS {
+    loop {
         let last = messages.last();
         if let Some(last) = last {
             let mut next_messages = channel_id
