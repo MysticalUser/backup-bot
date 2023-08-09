@@ -134,7 +134,7 @@ pub async fn backup_server(
         fs::create_dir(&attachments_dir).expect("Failed to create attachments directory");
     }
 
-    println!("Copying server {}..", server_name);
+    println!("Copying server {}", server_name);
 
     let server_archive = {
         let mut server_archive = ServerArchive {
@@ -202,13 +202,21 @@ pub async fn backup_server(
                 }
                 if download_attachments {
                     for attachment in message.attachments {
-                        let filename = format!("{} - {}", attachment.id.0, filenamify(attachment.filename.clone()));
+                        if !GENERAL_FILENAMES.contains(&attachment.filename.as_str()) {
+                            println!("Downloading {}", attachment.filename);
+                        }
                         let bytes = ByteBuf::from(attachment
                             .download().await
                             .inspect_err(|e| eprintln!("Error while downloading attachment: {e}")).unwrap());
-                        let attachment_path = channel_attachment_dir.clone().join(filename);
+                        let mut attachment_path = channel_attachment_dir.clone().join(attachment.id.0.to_string());
+                        if let Some((_, extension)) = attachment.filename.split_once(".") {
+                            attachment_path.set_extension(extension);
+                        } else {
+                            eprintln!("File {} has no extension", attachment.filename);
+                        }
                         let mut attachment_file = File::create(attachment_path).expect("Failed to create attachment file");
                         attachment_file.write_all(bytes.as_ref()).expect("Failed to write to attachment file");
+                        const GENERAL_FILENAMES: [&str; 2] = ["unknown.png", "image.png"];
                     }
                     let url_regex = Regex::new(URL_PATTERN).expect("Failed to compile regex");
                     let urls = url_regex
@@ -216,7 +224,7 @@ pub async fn backup_server(
                         .filter_map(|url| Url::parse(url.as_str()).inspect_err(|e| eprintln!("Failed to parse url: {e}")).ok());
                     for url in urls {
                         let domain = url.domain().expect("Invalid url");
-                        if IGNORED_DOMAINS.contains(&domain) { continue; }
+                        if IGNORED_DOMAINS.contains(&domain) { println!("Skipped {}", domain); continue; }
                         let last_segment = url.path_segments().unwrap().last().unwrap().to_string();
                         let url_string = url.to_string();
                         match reqwest::get(url).await {
